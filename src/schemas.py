@@ -7,6 +7,13 @@ class User(BaseModel):
     email: str
     password: str
 
+class ShowUser(BaseModel):
+    username: str
+    email: str
+
+    class Config:
+        orm_mode = True
+
 class LoginSchema(BaseModel):
     email: str
     password: str
