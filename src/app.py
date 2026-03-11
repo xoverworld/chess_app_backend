@@ -12,6 +12,8 @@ from src.database import engine, SessionLocal
 from src.services.hashing import Hash
 from src.services.oauth2 import get_current_user
 from src.services.token import create_access_token
+from fastapi import WebSocket, WebSocketDisconnect
+from src.services.connectionManager import manager
 
 app = FastAPI()
 origins = ["*"]
@@ -68,3 +70,33 @@ async def login(request: OAuth2PasswordRequestForm = Depends(),db: Session = Dep
 async def test(db: Session = Depends(get_db), current_user:User = Depends(get_current_user)):
     user = db.query(models.User).filter(models.User.email == current_user.email).first()
     return user
+
+
+@app.websocket("/ws/{room_id}")
+async def websocket_endpoint(websocket: WebSocket, room_id: str):
+    # 1. Player connects to the room
+    await manager.connect(websocket, room_id)
+
+    try:
+        # 2. The Infinite Loop (This keeps the tunnel open forever)
+        while True:
+            # The server pauses here and waits for this player to send a move
+            data = await websocket.receive_json()
+
+            # 3. When a move is received, broadcast it to the room
+            await manager.broadcast_to_room(room_id, data)
+
+    except WebSocketDisconnect:
+        # 4. If the player closes the tab, this exception is triggered
+        manager.disconnect(websocket, room_id)
+
+@app.websocket("/matchmaking")
+async def matchmaking(websocket: WebSocket):
+    await manager.subscribe(websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+
+
+    except WebSocketDisconnect:
+        manager.unsubscribe(websocket)
