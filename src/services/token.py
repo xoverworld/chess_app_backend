@@ -3,7 +3,7 @@ from os import getenv
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import HTTPException
+from fastapi import HTTPException, WebSocketException
 from jose import jwt, JWTError
 
 from src.schemas import TokenData
@@ -22,6 +22,18 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 def verify_token(token: str, credentials_exception: Optional[HTTPException] = None):
+    try:
+        payload = jwt.decode(token, getenv("JWT_SECRET_KEY"))
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+        token_data = TokenData(email=email)
+
+        return token_data
+    except JWTError:
+        raise credentials_exception
+
+def verify_token_ws(token: str, credentials_exception: Optional[WebSocketException] = None):
     try:
         payload = jwt.decode(token, getenv("JWT_SECRET_KEY"))
         email: str = payload.get("sub")

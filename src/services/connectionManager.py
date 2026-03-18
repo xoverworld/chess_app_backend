@@ -1,5 +1,7 @@
 from fastapi import WebSocket
-import uuid
+from src.schemas import UserSchema
+from src import models
+import random
 
 
 class ConnectionManager:
@@ -7,7 +9,54 @@ class ConnectionManager:
         # This dictionary will map a room_id to a list of connected WebSockets
         # Example: {"room_123": [PlayerA_Socket, PlayerB_Socket]}
         self.active_rooms: dict[str, list[WebSocket]] = {}
-        self.matchmaking_queue: list[WebSocket] = []
+        self.matchmaking_queue: list[dict] = []
+
+    async def subscribe(self, websocket: WebSocket, user: UserSchema,  db):
+        await websocket.accept()
+        if len(self.matchmaking_queue) > 0:
+            if self.matchmaking_queue[0]["user"].id != user.id:
+                opponent_data = self.matchmaking_queue.pop(0)
+                opponent_socket = opponent_data["websocket"]
+                opponent_user = opponent_data["user"]
+
+                opponent_is_white = random.choice([True, False])
+                if opponent_is_white:
+                    white_player_id = opponent_user.id
+                    black_player_id = user.id
+                    white_player_username = opponent_user.username
+                    black_player_username = user.username
+                else:
+                    white_player_id = user.id
+                    black_player_id = opponent_user.id
+                    white_player_username = user.username
+                    black_player_username = opponent_user.username
+
+                game = models.Game(white_id=white_player_id, black_id=black_player_id, white_username=white_player_username, black_username=black_player_username)
+
+                db.add(game)
+                db.commit()
+                db.refresh(game)
+
+                match_data1 = {"type": "match_found", "gameId": game.id, "color": "white"}
+                match_data2 = {"type": "match_found", "gameId": game.id, "color": "black"}
+                if opponent_is_white:
+                    await opponent_socket.send_json(match_data1)
+                    await websocket.send_json(match_data2)
+                else:
+                    await opponent_socket.send_json(match_data2)
+                    await websocket.send_json(match_data1)
+            else:
+                await websocket.send_json({"type": "waiting", "message": "Already in queue"})
+        else:
+            self.matchmaking_queue.append({"websocket":websocket, "user":user})
+            await websocket.send_json({"type": "waiting", "message": "Looking for opponent..."})
+
+
+    def unsubscribe(self, websocket: WebSocket):
+        self.matchmaking_queue = [
+            item for item in self.matchmaking_queue
+            if item["websocket"] != websocket
+        ]
 
     async def connect(self, websocket: WebSocket, room_id: str):
         await websocket.accept()  # "Pick up the phone"
@@ -18,26 +67,6 @@ class ConnectionManager:
 
         # Add this player's connection to the room
         self.active_rooms[room_id].append(websocket)
-
-    async def subscribe(self, websocket: WebSocket):
-        await websocket.accept()
-        if len(self.matchmaking_queue) > 0:
-            opponent_socket = self.matchmaking_queue.pop(0)
-
-            room_id = str(uuid.uuid4())
-
-            match_data1 = {"type": "match_found", "gameId": room_id, "reversed": False}
-            match_data2 = {"type": "match_found", "gameId": room_id, "reversed": True}
-            await opponent_socket.send_json(match_data1)
-            await websocket.send_json(match_data2)
-        else:
-            self.matchmaking_queue.append(websocket)
-            await websocket.send_json({"type": "waiting", "message": "Looking for opponent..."})
-
-
-    def unsubscribe(self, websocket: WebSocket):
-        if websocket in self.matchmaking_queue:
-            self.matchmaking_queue.remove(websocket)
 
     def disconnect(self, websocket: WebSocket, room_id: str):
         # Remove the player when they close the browser
