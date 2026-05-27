@@ -95,3 +95,5 @@ docs/_build/
 target/
 profile_default/
 ipython_config.py
+
+stockfish

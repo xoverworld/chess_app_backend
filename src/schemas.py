@@ -60,3 +60,7 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+
+class BotMoveRequest(BaseModel):
+    fen: str
+    difficulty: int = 1
