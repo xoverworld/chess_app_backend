@@ -18,6 +18,7 @@ class UserSchema(BaseModel):
 
 class Game(BaseModel):
 
+    id: str
     white_username: str
     black_username: str
     game_mode: str

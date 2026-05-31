@@ -19,6 +19,8 @@ from src.services.connectionManager import manager
 
 import chess
 import chess.engine
+import chess.pgn
+import io
 import os
 
 app = FastAPI()
@@ -45,7 +47,7 @@ def get_db():
         
 STOCKFISH_PATH = os.path.join(os.getcwd(), "stockfish", "stockfish-windows-x86-64-avx512icl.exe")
 
-@app.post("/api/bot-move")
+@app.post("/bot-move")
 async def get_bot_move(request: BotMoveRequest):
     board = chess.Board(request.fen)
     
@@ -238,27 +240,24 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, color:str = Non
             })
 
 @app.websocket("/matchmaking")
-async def matchmaking(websocket: WebSocket, current_user: UserSchema = Depends(get_current_user_ws), db: Session = Depends(get_db) ):
+async def matchmaking(websocket: WebSocket, timeLimit: int = 5, current_user: UserSchema = Depends(get_current_user_ws), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == current_user.email).first()
-    await manager.subscribe(websocket, user, db)
+
+    await manager.subscribe(websocket, user, db, timeLimit)
     try:
         while True:
             data = await websocket.receive_json()
-
-            # manager.unsubscribe(websocket)
-
-
     except WebSocketDisconnect:
         manager.unsubscribe(websocket)
 
 @app.websocket("/friend-game")
-async def friend_game(color:str, websocket: WebSocket, current_user: UserSchema = Depends(get_current_user_ws), db: Session = Depends(get_db)):
+async def friend_game(color: str, websocket: WebSocket, timeLimit: int = 5, current_user: UserSchema = Depends(get_current_user_ws), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == current_user.email).first()
-    await manager.create_friend_game(websocket,user,color)
+
+    await manager.create_friend_game(websocket, user, color, timeLimit)
     try:
         while True:
             data = await websocket.receive_json()
-
     except WebSocketDisconnect:
         manager.delete_friend_game(websocket)
 
@@ -287,3 +286,81 @@ async def get_game_info(game_id: str, db: Session = Depends(get_db)):
         "status": game.status,
         "pgn": game.pgn
     }
+
+@app.get("/analyze/{game_id}")
+async def analyze_game(game_id: str, db: Session = Depends(get_db), current_user:UserSchema = Depends(get_current_user)):
+    db_user = db.query(models.User).filter(models.User.email == current_user.email).first()
+    if not db_user:
+        return {"error": "Authentication error: User not found in database."}
+
+    game = db.query(models.Game).filter(models.Game.id == game_id).first()
+    if not game or not game.pgn:
+        return {"error": "Game or PGN not found"}
+
+    if db_user.id == game.white_id:
+        player_color = "white"
+    elif db_user.id == game.black_id:
+        player_color = "black"
+    else:
+        # If they didn't play in this game, send an error!
+        return {"error": "Unauthorized: You did not participate in this match."}
+
+    # 1. Load the game
+    board = chess.Board()
+    chess_game = chess.pgn.read_game(io.StringIO(game.pgn))
+
+    analysis_results = []
+
+    with chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH) as engine:
+        prev_eval = 0  # Starting position is 0.00
+
+        try:
+        # 2. Iterate through every move in the game
+            for node in chess_game.mainline():
+                board.push(node.move)
+
+                # Analyze the new position
+                info = engine.analyse(board, chess.engine.Limit(depth=10))
+
+                # Get the score from White's perspective
+                score = info["score"].white()
+
+                # Convert mate scores to massive centipawn numbers
+                if score.is_mate():
+                    current_eval = 10000 if score.mate() > 0 else -10000
+                else:
+                    current_eval = score.score()
+
+                # 3. Calculate the difference to classify the move
+                # If it was White's move, we want the eval to go UP. If Black, DOWN.
+                is_white_turn = board.turn == chess.BLACK  # Board turn has already advanced
+
+                if is_white_turn:
+                    eval_change = current_eval - prev_eval
+                else:
+                    eval_change = prev_eval - current_eval  # Flipped for black
+
+                # Classify the move
+                classification = "Good"
+                if eval_change < -300:
+                    classification = "Blunder"
+                elif eval_change < -100:
+                    classification = "Mistake"
+                elif eval_change < -50:
+                    classification = "Inaccuracy"
+                elif eval_change > 0:
+                    classification = "Best"
+
+                analysis_results.append({
+                    "san": node.san(),  # The text of the move (e.g., 'Nf3')
+                    "fen": board.fen(),
+                    "eval": current_eval / 100,  # Convert to standard pawn units (e.g., +1.5)
+                    "classification": classification
+                })
+
+                prev_eval = current_eval
+
+        except AssertionError:
+            return {"error": "This match contains corrupted data and cannot be analyzed."}
+
+    return {"moves": analysis_results, "player_color": player_color}
