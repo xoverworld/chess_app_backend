@@ -14,8 +14,9 @@ from src.database import engine, SessionLocal
 from src.services.hashing import Hash
 from src.services.oauth2 import get_current_user, get_current_user_ws
 from src.services.token import create_access_token
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocket, WebSocketDisconnect, WebSocketException
 from src.services.connectionManager import manager
+
 
 import chess
 import chess.engine
@@ -93,7 +94,7 @@ async def login(request: OAuth2PasswordRequestForm = Depends(), db: Session = De
     return {"token": create_access_token(data={"sub": user1.email}), "user": user1}
 
 @app.get("/me", response_model=ShowUser)
-async def test(db: Session = Depends(get_db), current_user:User = Depends(get_current_user)):
+async def get_current_user_profile(db: Session = Depends(get_db), current_user:User = Depends(get_current_user)):
     user = db.query(models.User).filter(models.User.email == current_user.email).first()
     return user
 
@@ -135,15 +136,35 @@ def update_player_stats(db: Session, game: models.Game):
 
 
 @app.websocket("/ws/{room_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: str, color:str = None, time_limit: int = 600, db: Session = Depends(get_db)):
+async def websocket_endpoint(websocket: WebSocket, room_id: str, color:str = None, time_limit: int = 600, current_user: UserSchema = Depends(get_current_user_ws), db: Session = Depends(get_db)):
 
-    await manager.connect(websocket, room_id)
+    # Accept the connection first so we can return WebSocket close codes instead of HTTP errors
+    await websocket.accept()
+
+    db_user = db.query(models.User).filter(models.User.email == current_user.email).first()
+    if not db_user:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="User not found")
+        return
+
+    game = db.query(models.Game).filter(models.Game.id == room_id).first()
+    if not game:
+        await websocket.close(code=status.WS_1003_UNSUPPORTED_DATA, reason="Game not found")
+        return
+
+    if db_user.id != game.white_id and db_user.id != game.black_id:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unauthorized player")
+        return
+
+    # Add the connection to active rooms
+    if room_id not in manager.active_rooms:
+        manager.active_rooms[room_id] = []
+    manager.active_rooms[room_id].append(websocket)
 
     if room_id not in manager.game_states:
         manager.game_states[room_id] = {
             "white_time": float(time_limit),
             "black_time": float(time_limit),
-            "last_move_time": None, # Starts on the very first move
+            "last_move_time": None,
             "unlimited": time_limit == 0
         }
 
